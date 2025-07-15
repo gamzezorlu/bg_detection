@@ -5,337 +5,431 @@ import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from datetime import datetime, timedelta
+import io
+from scipy import stats
 import warnings
 warnings.filterwarnings('ignore')
 
 # Sayfa konfigürasyonu
 st.set_page_config(
     page_title="Doğalgaz Kaçak Kullanım Tespit Sistemi",
-    page_icon="⚡",
+    page_icon="🔍",
     layout="wide"
 )
 
+# Ana başlık
 st.title("🔍 Doğalgaz Kaçak Kullanım Tespit Sistemi")
 st.markdown("---")
 
-# Sidebar
-st.sidebar.header("📊 Analiz Parametreleri")
+# Sidebar - Dosya yükleme
+st.sidebar.header("📁 Dosya Yükleme")
+uploaded_file = st.sidebar.file_uploader(
+    "Excel dosyasını yükleyin",
+    type=['xlsx', 'xls'],
+    help="Tesisat no, tarih, bağlantı nesnesi ve tüketim (sm3) sütunlarını içeren Excel dosyası"
+)
 
-# Veri yükleme fonksiyonu
-@st.cache_data
-def load_data():
-    """Örnek veri oluşturma - gerçek verinizi buraya yükleyebilirsiniz"""
-    # Örnek veri yapısı
-    dates = pd.date_range(start='2018-01-01', end='2024-12-01', freq='MS')
-    tesisatlar = [f"001000{i:03d}" for i in range(216, 550, 5)]  # Örnek tesisat numaraları
-    
-    data = []
-    for tesisat in tesisatlar:
-        for date in dates:
-            # Normal tüketim paterni
-            base_consumption = np.random.normal(400, 100)
-            # Mevsimsel etki (kış aylarında daha fazla)
-            seasonal_factor = 1.5 if date.month in [12, 1, 2] else 1.0
-            # Bazı tesisatlarda kaçak kullanım simülasyonu
-            if tesisat in tesisatlar[::10] and np.random.random() < 0.3:
-                # Anormal düşük tüketim (kaçak kullanım)
-                consumption = base_consumption * seasonal_factor * 0.3
-            else:
-                consumption = base_consumption * seasonal_factor
-            
-            data.append({
-                'Tarih': date,
-                'Tesisat_No': tesisat,
-                'Baglanti_Nesnesi': f"BLK{tesisat[-3:]}",
-                'SM3': max(0, consumption),
-                'Yil': date.year,
-                'Ay': date.month
-            })
-    
-    return pd.DataFrame(data)
+# Analiz parametreleri
+st.sidebar.header("⚙️ Analiz Parametreleri")
+seasonal_threshold = st.sidebar.slider(
+    "Mevsimsel Sapma Eşiği (%)",
+    min_value=10,
+    max_value=80,
+    value=40,
+    help="Mevsimsel ortalamadan sapma yüzdesi"
+)
 
-# Kaçak tespit algoritmaları
-class KacakTespitAlgorithms:
-    def __init__(self, df):
-        self.df = df
+trend_threshold = st.sidebar.slider(
+    "Trend Değişim Eşiği (%)",
+    min_value=20,
+    max_value=90,
+    value=50,
+    help="Ani düşüş/artış tespit eşiği"
+)
+
+min_months = st.sidebar.slider(
+    "Minimum Veri Süresi (Ay)",
+    min_value=6,
+    max_value=24,
+    value=12,
+    help="Analiz için minimum veri süresi"
+)
+
+def load_and_process_data(file):
+    """Veriyi yükle ve işle"""
+    try:
+        # Excel dosyasını oku
+        df = pd.read_excel(file)
         
-    def istatistiksel_analiz(self, threshold_factor=2.5):
-        """İstatistiksel anomali tespiti"""
-        results = []
+        # Sütun adlarını standartlaştır
+        df.columns = df.columns.str.lower().str.strip()
         
-        for tesisat in self.df['Tesisat_No'].unique():
-            tesisat_data = self.df[self.df['Tesisat_No'] == tesisat].copy()
-            tesisat_data = tesisat_data.sort_values('Tarih')
-            
-            # Aylık tüketim ortalaması ve standart sapması
-            mean_consumption = tesisat_data['SM3'].mean()
-            std_consumption = tesisat_data['SM3'].std()
-            
-            # Anomali tespiti
-            lower_bound = mean_consumption - threshold_factor * std_consumption
-            upper_bound = mean_consumption + threshold_factor * std_consumption
-            
-            anomalies = tesisat_data[
-                (tesisat_data['SM3'] < lower_bound) | 
-                (tesisat_data['SM3'] > upper_bound)
-            ]
-            
-            if len(anomalies) > 0:
-                results.append({
-                    'Tesisat_No': tesisat,
-                    'Anomali_Sayisi': len(anomalies),
-                    'Ortalama_Tuketim': mean_consumption,
-                    'Min_Tuketim': tesisat_data['SM3'].min(),
-                    'Max_Tuketim': tesisat_data['SM3'].max(),
-                    'Risk_Skoru': len(anomalies) / len(tesisat_data) * 100
-                })
+        # Gerekli sütunları kontrol et
+        required_cols = ['tesisat_no', 'tarih', 'baglanti_nesnesi', 'sm3']
+        missing_cols = [col for col in required_cols if col not in df.columns]
         
-        return pd.DataFrame(results)
+        if missing_cols:
+            st.error(f"Eksik sütunlar: {missing_cols}")
+            return None
+        
+        # Tarih sütununu datetime'a çevir
+        df['tarih'] = pd.to_datetime(df['tarih'])
+        
+        # Numerik sütunları kontrol et
+        df['sm3'] = pd.to_numeric(df['sm3'], errors='coerce')
+        df['tesisat_no'] = pd.to_numeric(df['tesisat_no'], errors='coerce')
+        
+        # Eksik verileri temizle
+        df = df.dropna(subset=['tesisat_no', 'tarih', 'sm3'])
+        
+        # Tarih indeksi oluştur
+        df['yil'] = df['tarih'].dt.year
+        df['ay'] = df['tarih'].dt.month
+        df['mevsim'] = df['ay'].apply(lambda x: 'Kış' if x in [12, 1, 2] else 
+                                               'İlkbahar' if x in [3, 4, 5] else 
+                                               'Yaz' if x in [6, 7, 8] else 'Sonbahar')
+        
+        return df
     
-    def mevsimsel_analiz(self):
-        """Mevsimsel pattern analizi"""
-        results = []
-        
-        for tesisat in self.df['Tesisat_No'].unique():
-            tesisat_data = self.df[self.df['Tesisat_No'] == tesisat].copy()
-            
-            # Aylık ortalamalar
-            monthly_avg = tesisat_data.groupby('Ay')['SM3'].mean()
-            
-            # Kış ayları (12, 1, 2) ile diğer aylar karşılaştırması
-            winter_avg = monthly_avg[[12, 1, 2]].mean()
-            other_avg = monthly_avg[[3, 4, 5, 6, 7, 8, 9, 10, 11]].mean()
-            
-            # Normal durumda kış tüketimi daha yüksek olmalı
-            seasonal_ratio = winter_avg / other_avg if other_avg > 0 else 0
-            
-            # Anormal düşük mevsimsel oran kaçak kullanım işareti olabilir
-            if seasonal_ratio < 1.2:  # Normal oran 1.5+ olmalı
-                results.append({
-                    'Tesisat_No': tesisat,
-                    'Kis_Ortalama': winter_avg,
-                    'Diger_Ortalama': other_avg,
-                    'Mevsimsel_Oran': seasonal_ratio,
-                    'Risk_Durumu': 'Yüksek Risk' if seasonal_ratio < 1.0 else 'Orta Risk'
-                })
-        
-        return pd.DataFrame(results)
+    except Exception as e:
+        st.error(f"Veri yükleme hatası: {str(e)}")
+        return None
+
+def detect_anomalies(df, seasonal_threshold, trend_threshold, min_months):
+    """Kaçak kullanım tespiti"""
+    suspicious_facilities = []
     
-    def trend_analizi(self):
-        """Tüketim trend analizi"""
-        results = []
+    # Her tesisat için analiz
+    for tesisat in df['tesisat_no'].unique():
+        facility_data = df[df['tesisat_no'] == tesisat].copy()
+        facility_data = facility_data.sort_values('tarih')
         
-        for tesisat in self.df['Tesisat_No'].unique():
-            tesisat_data = self.df[self.df['Tesisat_No'] == tesisat].copy()
-            tesisat_data = tesisat_data.sort_values('Tarih')
-            
-            if len(tesisat_data) < 12:  # En az 1 yıl veri gerekli
-                continue
-            
-            # Son 12 ay ve önceki 12 ay karşılaştırması
-            recent_12 = tesisat_data.tail(12)['SM3'].mean()
-            previous_12 = tesisat_data.iloc[-24:-12]['SM3'].mean() if len(tesisat_data) >= 24 else None
-            
-            if previous_12 and previous_12 > 0:
-                change_rate = ((recent_12 - previous_12) / previous_12) * 100
-                
-                # Anormal düşüş kaçak kullanım işareti olabilir
-                if change_rate < -30:  # %30'dan fazla düşüş
-                    results.append({
-                        'Tesisat_No': tesisat,
-                        'Onceki_12_Ay': previous_12,
-                        'Son_12_Ay': recent_12,
-                        'Degisim_Orani': change_rate,
-                        'Risk_Durumu': 'Yüksek Risk' if change_rate < -50 else 'Orta Risk'
+        # Minimum veri kontrolü
+        if len(facility_data) < min_months:
+            continue
+        
+        # Mevsimsel ortalamalar
+        seasonal_avg = facility_data.groupby('mevsim')['sm3'].mean()
+        
+        # Trend analizi
+        facility_data['rolling_avg'] = facility_data['sm3'].rolling(window=3, min_periods=1).mean()
+        
+        # Anomali tespiti
+        anomalies = []
+        
+        # 1. Mevsimsel anormallik
+        for _, row in facility_data.iterrows():
+            season_avg = seasonal_avg.get(row['mevsim'], facility_data['sm3'].mean())
+            if season_avg > 0:
+                deviation = abs(row['sm3'] - season_avg) / season_avg * 100
+                if deviation > seasonal_threshold:
+                    anomalies.append({
+                        'type': 'Mevsimsel Anormallik',
+                        'date': row['tarih'],
+                        'value': row['sm3'],
+                        'expected': season_avg,
+                        'deviation': deviation
                     })
         
-        return pd.DataFrame(results)
+        # 2. Ani düşüş/artış
+        for i in range(1, len(facility_data)):
+            current = facility_data.iloc[i]['sm3']
+            previous = facility_data.iloc[i-1]['sm3']
+            
+            if previous > 0:
+                change = abs(current - previous) / previous * 100
+                if change > trend_threshold:
+                    anomalies.append({
+                        'type': 'Ani Değişim',
+                        'date': facility_data.iloc[i]['tarih'],
+                        'value': current,
+                        'expected': previous,
+                        'deviation': change
+                    })
+        
+        # 3. Sürekli düşük tüketim (yaz ayları hariç)
+        winter_spring_data = facility_data[facility_data['mevsim'].isin(['Kış', 'İlkbahar'])]
+        if len(winter_spring_data) > 0:
+            avg_consumption = winter_spring_data['sm3'].mean()
+            low_consumption_months = winter_spring_data[winter_spring_data['sm3'] < avg_consumption * 0.3]
+            
+            if len(low_consumption_months) > 2:
+                anomalies.append({
+                    'type': 'Sürekli Düşük Tüketim',
+                    'date': low_consumption_months.iloc[0]['tarih'],
+                    'value': low_consumption_months['sm3'].mean(),
+                    'expected': avg_consumption,
+                    'deviation': 70
+                })
+        
+        # 4. Sıfır tüketim
+        zero_consumption = facility_data[facility_data['sm3'] == 0]
+        if len(zero_consumption) > 1:
+            anomalies.append({
+                'type': 'Sıfır Tüketim',
+                'date': zero_consumption.iloc[0]['tarih'],
+                'value': 0,
+                'expected': facility_data['sm3'].mean(),
+                'deviation': 100
+            })
+        
+        # Şüpheli tesisatları kaydet
+        if anomalies:
+            risk_score = len(anomalies) + sum([a['deviation'] for a in anomalies]) / len(anomalies)
+            
+            suspicious_facilities.append({
+                'tesisat_no': tesisat,
+                'baglanti_nesnesi': facility_data['baglanti_nesnesi'].iloc[0],
+                'toplam_anomali': len(anomalies),
+                'risk_skoru': risk_score,
+                'anomali_tipleri': ', '.join(list(set([a['type'] for a in anomalies]))),
+                'ortalama_tuketim': facility_data['sm3'].mean(),
+                'son_tuketim': facility_data['sm3'].iloc[-1],
+                'ilk_anomali_tarihi': min([a['date'] for a in anomalies]),
+                'anomali_detaylari': anomalies
+            })
+    
+    return pd.DataFrame(suspicious_facilities)
+
+def create_visualizations(df, suspicious_df):
+    """Görselleştirmeler oluştur"""
+    
+    # 1. Genel tüketim trendi
+    monthly_consumption = df.groupby(['yil', 'ay'])['sm3'].sum().reset_index()
+    monthly_consumption['tarih'] = pd.to_datetime(monthly_consumption[['yil', 'ay']].assign(day=1))
+    
+    fig1 = px.line(
+        monthly_consumption, 
+        x='tarih', 
+        y='sm3',
+        title='Toplam Aylık Doğalgaz Tüketimi',
+        labels={'sm3': 'Tüketim (sm³)', 'tarih': 'Tarih'}
+    )
+    fig1.update_layout(height=400)
+    
+    # 2. Mevsimsel analiz
+    seasonal_data = df.groupby('mevsim')['sm3'].mean().reset_index()
+    fig2 = px.bar(
+        seasonal_data,
+        x='mevsim',
+        y='sm3',
+        title='Mevsimsel Ortalama Tüketim',
+        labels={'sm3': 'Ortalama Tüketim (sm³)', 'mevsim': 'Mevsim'}
+    )
+    fig2.update_layout(height=400)
+    
+    # 3. Risk skoru dağılımı
+    if not suspicious_df.empty:
+        fig3 = px.histogram(
+            suspicious_df,
+            x='risk_skoru',
+            nbins=20,
+            title='Şüpheli Tesisatlar Risk Skoru Dağılımı',
+            labels={'risk_skoru': 'Risk Skoru', 'count': 'Tesisat Sayısı'}
+        )
+        fig3.update_layout(height=400)
+    else:
+        fig3 = go.Figure()
+        fig3.add_annotation(text="Şüpheli tesisat bulunamadı", x=0.5, y=0.5)
+        fig3.update_layout(height=400, title="Risk Skoru Dağılımı")
+    
+    return fig1, fig2, fig3
+
+def export_results(suspicious_df, df):
+    """Sonuçları Excel formatında hazırla"""
+    output = io.BytesIO()
+    
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        # Şüpheli tesisatlar
+        export_df = suspicious_df.copy()
+        if 'anomali_detaylari' in export_df.columns:
+            export_df = export_df.drop('anomali_detaylari', axis=1)
+        
+        export_df.to_excel(writer, sheet_name='Şüpheli Tesisatlar', index=False)
+        
+        # Genel istatistikler
+        stats_df = pd.DataFrame({
+            'Metrik': [
+                'Toplam Tesisat Sayısı',
+                'Şüpheli Tesisat Sayısı',
+                'Şüpheli Oran (%)',
+                'Ortalama Risk Skoru',
+                'Yüksek Risk Tesisat (>100)',
+                'Analiz Edilen Dönem'
+            ],
+            'Değer': [
+                df['tesisat_no'].nunique(),
+                len(suspicious_df),
+                round(len(suspicious_df) / df['tesisat_no'].nunique() * 100, 2) if df['tesisat_no'].nunique() > 0 else 0,
+                round(suspicious_df['risk_skoru'].mean(), 2) if not suspicious_df.empty else 0,
+                len(suspicious_df[suspicious_df['risk_skoru'] > 100]) if not suspicious_df.empty else 0,
+                f"{df['tarih'].min().strftime('%Y-%m')} - {df['tarih'].max().strftime('%Y-%m')}"
+            ]
+        })
+        
+        stats_df.to_excel(writer, sheet_name='Genel İstatistikler', index=False)
+    
+    output.seek(0)
+    return output
 
 # Ana uygulama
-def main():
-    # Veri yükleme
-    df = load_data()
+if uploaded_file is not None:
+    # Veriyi yükle
+    with st.spinner("Veri yükleniyor..."):
+        df = load_and_process_data(uploaded_file)
     
-    # Sidebar parametreler
-    st.sidebar.subheader("🔧 Tespit Parametreleri")
-    threshold_factor = st.sidebar.slider("İstatistiksel Threshold", 1.0, 4.0, 2.5, 0.1)
-    
-    # Algoritma seçimi
-    st.sidebar.subheader("🎯 Analiz Türü")
-    analiz_turu = st.sidebar.selectbox(
-        "Analiz türünü seçin:",
-        ["Genel Bakış", "İstatistiksel Analiz", "Mevsimsel Analiz", "Trend Analizi", "Detaylı Tesisat Analizi"]
-    )
-    
-    # Algoritma sınıfını başlat
-    detector = KacakTespitAlgorithms(df)
-    
-    if analiz_turu == "Genel Bakış":
-        st.header("📈 Genel Bakış")
-        
+    if df is not None:
+        # Temel istatistikler
         col1, col2, col3, col4 = st.columns(4)
         
         with col1:
-            st.metric("Toplam Tesisat", len(df['Tesisat_No'].unique()))
+            st.metric("Toplam Tesisat", df['tesisat_no'].nunique())
         
         with col2:
             st.metric("Toplam Kayıt", len(df))
         
         with col3:
-            avg_consumption = df['SM3'].mean()
-            st.metric("Ortalama Tüketim", f"{avg_consumption:.2f} SM3")
+            st.metric("Tarih Aralığı", f"{df['tarih'].min().strftime('%Y-%m')} - {df['tarih'].max().strftime('%Y-%m')}")
         
         with col4:
-            total_consumption = df['SM3'].sum()
-            st.metric("Toplam Tüketim", f"{total_consumption:,.0f} SM3")
+            st.metric("Ortalama Tüketim", f"{df['sm3'].mean():.2f} sm³")
         
-        # Aylık toplam tüketim grafiği
-        monthly_total = df.groupby('Tarih')['SM3'].sum().reset_index()
-        fig = px.line(monthly_total, x='Tarih', y='SM3', 
-                     title="Aylık Toplam Doğalgaz Tüketimi")
-        st.plotly_chart(fig, use_container_width=True)
+        st.markdown("---")
         
-        # Tüketim dağılımı
-        fig = px.histogram(df, x='SM3', nbins=50, 
-                          title="Tüketim Dağılımı")
-        st.plotly_chart(fig, use_container_width=True)
-    
-    elif analiz_turu == "İstatistiksel Analiz":
-        st.header("📊 İstatistiksel Anomali Analizi")
+        # Anomali tespiti
+        with st.spinner("Kaçak kullanım analizi yapılıyor..."):
+            suspicious_df = detect_anomalies(df, seasonal_threshold, trend_threshold, min_months)
         
-        anomalies_df = detector.istatistiksel_analiz(threshold_factor)
-        
-        if not anomalies_df.empty:
-            st.subheader("🚨 Şüpheli Tesisatlar")
+        # Sonuçlar
+        if not suspicious_df.empty:
+            st.success(f"🚨 {len(suspicious_df)} adet şüpheli tesisat tespit edildi!")
             
-            # Risk skoruna göre sıralama
-            anomalies_df = anomalies_df.sort_values('Risk_Skoru', ascending=False)
+            # Sonuçları göster
+            st.subheader("🔍 Şüpheli Tesisatlar")
             
-            # Renkli tablo
+            # Risk seviyesine göre renklendirme
+            def risk_color(risk_score):
+                if risk_score > 150:
+                    return 'background-color: #ffebee'  # Kırmızı
+                elif risk_score > 100:
+                    return 'background-color: #fff3e0'  # Turuncu
+                else:
+                    return 'background-color: #f3e5f5'  # Mor
+            
+            display_df = suspicious_df[['tesisat_no', 'baglanti_nesnesi', 'toplam_anomali', 
+                                      'risk_skoru', 'anomali_tipleri', 'ortalama_tuketim', 
+                                      'son_tuketim', 'ilk_anomali_tarihi']].copy()
+            
+            display_df['risk_skoru'] = display_df['risk_skoru'].round(2)
+            display_df['ortalama_tuketim'] = display_df['ortalama_tuketim'].round(2)
+            display_df['ilk_anomali_tarihi'] = display_df['ilk_anomali_tarihi'].dt.strftime('%Y-%m-%d')
+            
+            # Sıralama
+            display_df = display_df.sort_values('risk_skoru', ascending=False)
+            
             st.dataframe(
-                anomalies_df.style.background_gradient(subset=['Risk_Skoru'], cmap='Reds'),
+                display_df.style.apply(lambda x: [risk_color(val) if col == 'risk_skoru' else '' 
+                                                for col, val in x.items()], axis=1),
                 use_container_width=True
             )
             
-            # Risk skoru dağılımı
-            fig = px.bar(anomalies_df.head(20), x='Tesisat_No', y='Risk_Skoru',
-                        title="En Yüksek Risk Skorlu Tesisatlar")
-            fig.update_xaxis(tickangle=45)
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.info("Belirlenen parametrelere göre anomali tespit edilmedi.")
-    
-    elif analiz_turu == "Mevsimsel Analiz":
-        st.header("❄️ Mevsimsel Pattern Analizi")
-        
-        seasonal_df = detector.mevsimsel_analiz()
-        
-        if not seasonal_df.empty:
-            st.subheader("🔍 Mevsimsel Anomaliler")
+            # Görselleştirmeler
+            st.subheader("📊 Analiz Grafikleri")
             
-            # Risk durumuna göre renklendirme
-            def risk_color(val):
-                if val == 'Yüksek Risk':
-                    return 'background-color: #ffcccc'
-                elif val == 'Orta Risk':
-                    return 'background-color: #fff3cd'
-                return ''
-            
-            st.dataframe(
-                seasonal_df.style.applymap(risk_color, subset=['Risk_Durumu']),
-                use_container_width=True
-            )
-            
-            # Mevsimsel oran dağılımı
-            fig = px.histogram(seasonal_df, x='Mevsimsel_Oran', 
-                             title="Mevsimsel Oran Dağılımı")
-            fig.add_vline(x=1.2, line_dash="dash", line_color="red", 
-                         annotation_text="Normal Threshold")
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.info("Mevsimsel anomali tespit edilmedi.")
-    
-    elif analiz_turu == "Trend Analizi":
-        st.header("📈 Tüketim Trend Analizi")
-        
-        trend_df = detector.trend_analizi()
-        
-        if not trend_df.empty:
-            st.subheader("📉 Anormal Tüketim Değişiklikleri")
-            
-            def trend_color(val):
-                if val == 'Yüksek Risk':
-                    return 'background-color: #ffcccc'
-                elif val == 'Orta Risk':
-                    return 'background-color: #fff3cd'
-                return ''
-            
-            st.dataframe(
-                trend_df.style.applymap(trend_color, subset=['Risk_Durumu']),
-                use_container_width=True
-            )
-            
-            # Değişim oranı dağılımı
-            fig = px.bar(trend_df, x='Tesisat_No', y='Degisim_Orani',
-                        title="Tüketim Değişim Oranları (%)")
-            fig.add_hline(y=-30, line_dash="dash", line_color="red",
-                         annotation_text="Risk Threshold")
-            fig.update_xaxis(tickangle=45)
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.info("Anormal trend tespit edilmedi.")
-    
-    elif analiz_turu == "Detaylı Tesisat Analizi":
-        st.header("🔍 Detaylı Tesisat Analizi")
-        
-        # Tesisat seçimi
-        selected_tesisat = st.selectbox(
-            "Analiz edilecek tesisatı seçin:",
-            df['Tesisat_No'].unique()
-        )
-        
-        if selected_tesisat:
-            tesisat_data = df[df['Tesisat_No'] == selected_tesisat].copy()
-            tesisat_data = tesisat_data.sort_values('Tarih')
+            fig1, fig2, fig3 = create_visualizations(df, suspicious_df)
             
             col1, col2 = st.columns(2)
-            
             with col1:
-                st.metric("Ortalama Tüketim", f"{tesisat_data['SM3'].mean():.2f} SM3")
-                st.metric("Minimum Tüketim", f"{tesisat_data['SM3'].min():.2f} SM3")
+                st.plotly_chart(fig1, use_container_width=True)
             
             with col2:
-                st.metric("Maksimum Tüketim", f"{tesisat_data['SM3'].max():.2f} SM3")
-                st.metric("Standart Sapma", f"{tesisat_data['SM3'].std():.2f} SM3")
+                st.plotly_chart(fig2, use_container_width=True)
             
-            # Zaman serisi grafiği
-            fig = px.line(tesisat_data, x='Tarih', y='SM3',
-                         title=f"Tesisat {selected_tesisat} - Zaman Serisi")
+            st.plotly_chart(fig3, use_container_width=True)
             
-            # Ortalama çizgisi
-            mean_val = tesisat_data['SM3'].mean()
-            fig.add_hline(y=mean_val, line_dash="dash", line_color="green",
-                         annotation_text=f"Ortalama: {mean_val:.2f}")
+            # Detaylı analiz
+            st.subheader("🔍 Detaylı Tesisat Analizi")
+            selected_facility = st.selectbox(
+                "Analiz edilecek tesisatı seçin:",
+                suspicious_df['tesisat_no'].tolist()
+            )
             
-            # Anomali thresholdları
-            std_val = tesisat_data['SM3'].std()
-            fig.add_hline(y=mean_val + 2*std_val, line_dash="dash", line_color="red",
-                         annotation_text="Üst Threshold")
-            fig.add_hline(y=mean_val - 2*std_val, line_dash="dash", line_color="red",
-                         annotation_text="Alt Threshold")
+            if selected_facility:
+                facility_data = df[df['tesisat_no'] == selected_facility].copy()
+                facility_data = facility_data.sort_values('tarih')
+                
+                # Tesisat grafiği
+                fig_facility = px.line(
+                    facility_data,
+                    x='tarih',
+                    y='sm3',
+                    title=f'Tesisat {selected_facility} - Tüketim Trendi',
+                    labels={'sm3': 'Tüketim (sm³)', 'tarih': 'Tarih'}
+                )
+                
+                # Mevsimsel ortalama çizgisi ekle
+                seasonal_avg = facility_data.groupby('mevsim')['sm3'].mean()
+                for season, avg in seasonal_avg.items():
+                    season_data = facility_data[facility_data['mevsim'] == season]
+                    if not season_data.empty:
+                        fig_facility.add_hline(
+                            y=avg,
+                            line_dash="dash",
+                            annotation_text=f"{season} Ort: {avg:.2f}",
+                            annotation_position="top left"
+                        )
+                
+                st.plotly_chart(fig_facility, use_container_width=True)
+                
+                # Anomali detayları
+                facility_anomalies = suspicious_df[suspicious_df['tesisat_no'] == selected_facility]['anomali_detaylari'].iloc[0]
+                
+                st.subheader("⚠️ Tespit Edilen Anomaliler")
+                for i, anomaly in enumerate(facility_anomalies):
+                    st.write(f"**{i+1}. {anomaly['type']}**")
+                    st.write(f"- Tarih: {anomaly['date'].strftime('%Y-%m-%d')}")
+                    st.write(f"- Ölçülen Değer: {anomaly['value']:.2f} sm³")
+                    st.write(f"- Beklenen Değer: {anomaly['expected']:.2f} sm³")
+                    st.write(f"- Sapma: %{anomaly['deviation']:.2f}")
+                    st.write("---")
             
-            st.plotly_chart(fig, use_container_width=True)
+            # Excel export
+            st.subheader("📥 Sonuçları İndir")
+            excel_file = export_results(suspicious_df, df)
             
-            # Aylık dağılım
-            monthly_consumption = tesisat_data.groupby('Ay')['SM3'].mean().reset_index()
-            monthly_consumption['Ay_Adi'] = monthly_consumption['Ay'].map({
-                1: 'Ocak', 2: 'Şubat', 3: 'Mart', 4: 'Nisan', 5: 'Mayıs', 6: 'Haziran',
-                7: 'Temmuz', 8: 'Ağustos', 9: 'Eylül', 10: 'Ekim', 11: 'Kasım', 12: 'Aralık'
-            })
-            
-            fig = px.bar(monthly_consumption, x='Ay_Adi', y='SM3',
-                        title="Aylık Ortalama Tüketim")
-            st.plotly_chart(fig, use_container_width=True)
+            st.download_button(
+                label="📊 Excel Raporu İndir",
+                data=excel_file,
+                file_name=f"kacak_kullanim_raporu_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+        
+        else:
+            st.info("✅ Mevcut parametrelerle şüpheli tesisat tespit edilmedi.")
+            st.write("Analiz parametrelerini düşürerek tekrar deneyin.")
+    
+else:
+    st.info("📁 Lütfen analiz edilecek Excel dosyasını yükleyin.")
+    
+    # Örnek veri formatı
+    st.subheader("📋 Beklenen Veri Formatı")
+    sample_data = pd.DataFrame({
+        'tesisat_no': [1001, 1001, 1002, 1002],
+        'tarih': ['2024-01-01', '2024-02-01', '2024-01-01', '2024-02-01'],
+        'baglanti_nesnesi': [100003156, 100003156, 100003157, 100003157],
+        'sm3': [500.13, 450.25, 380.75, 420.50]
+    })
+    
+    st.dataframe(sample_data, use_container_width=True)
+    
+    st.markdown("""
+    **Sütun Açıklamaları:**
+    - **tesisat_no**: Tesisat numarası
+    - **tarih**: Ölçüm tarihi (YYYY-MM-DD formatında)
+    - **baglanti_nesnesi**: Tesisatın bağlı olduğu bina numarası
+    - **sm3**: Aylık doğalgaz tüketimi (standart metreküp)
+    """)
 
-if __name__ == "__main__":
-    main()
+# Footer
+st.markdown("---")
+st.markdown("🔍 **Doğalgaz Kaçak Kullanım Tespit Sistemi** - Gelişmiş analiz ve raporlama özellikleri")
