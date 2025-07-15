@@ -10,7 +10,8 @@ warnings.filterwarnings('ignore')
 # Sayfa konfigürasyonu
 st.set_page_config(
     page_title="Doğalgaz Tüketim Anomali Tespit",
-    page_icon="🔥"
+    page_icon="🔥",
+    layout="wide"
 )
 
 st.title("🔥 Doğalgaz Tüketim Anomali Tespit Sistemi")
