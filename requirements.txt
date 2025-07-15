@@ -4,4 +4,4 @@ openpyxl==3.1.2
 numpy
 plotly
 scipy
-sklearn
+scikit-learn
