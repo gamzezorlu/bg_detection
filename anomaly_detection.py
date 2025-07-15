@@ -364,27 +364,27 @@ if uploaded_file is not None:
                 help="Bina numarasını içeren sütunu seçin"
             )
         
-        # Tarih sütunlarını göster
-        st.write(f"**Tespit edilen tarih sütunları:** {len(date_columns)} adet")
-      # Tarih sütunlarını göster
-        st.write(f"**Tespit edilen tarih sütunları:** {len(date_columns)} adet")
+        if date_columns and isinstance(date_columns, list):
+    st.write(f"**Tespit edilen tarih sütunları:** {len(date_columns)} adet")
+    
+    # String tarihleri datetime nesnesine çevir
+    parsed_dates = []
+    for date_str in date_columns:
+        try:
+            parsed_date = datetime.datetime.strptime(date_str, "%Y/%m")
+            parsed_dates.append(parsed_date)
+        except:
+            continue
 
-# String tarihleri datetime nesnesine çevir
-parsed_dates = []
-for date_str in date_columns:
-    try:
-        parsed_date = datetime.datetime.strptime(date_str, "%Y/%m")
-        parsed_dates.append(parsed_date)
-    except:
-        continue
-
-# Tarih aralığını güvenli şekilde göster
-if parsed_dates:
-    min_date = min(parsed_dates).strftime("%Y/%m")
-    max_date = max(parsed_dates).strftime("%Y/%m")
-    st.write(f"Tarih aralığı: {min_date} - {max_date}")
+    # Tarih aralığını güvenli şekilde göster
+    if parsed_dates:
+        min_date = min(parsed_dates).strftime("%Y/%m")
+        max_date = max(parsed_dates).strftime("%Y/%m")
+        st.write(f"Tarih aralığı: {min_date} - {max_date}")
+    else:
+        st.warning("Tarih sütunları uygun formatta değil veya boş.")
 else:
-    st.warning("Tarih sütunları uygun formatta değil veya boş.")
+    st.warning("Tarih sütunları tespit
 
         
         # Analiz butonu
