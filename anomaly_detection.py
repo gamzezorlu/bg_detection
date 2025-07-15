@@ -5,6 +5,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import warnings
+import datetime
 warnings.filterwarnings('ignore')
 
 # Sayfa konfigürasyonu
@@ -365,7 +366,26 @@ if uploaded_file is not None:
         
         # Tarih sütunlarını göster
         st.write(f"**Tespit edilen tarih sütunları:** {len(date_columns)} adet")
-        st.write(f"Tarih aralığı: {min(date_columns)} - {max(date_columns)}")
+      # Tarih sütunlarını göster
+        st.write(f"**Tespit edilen tarih sütunları:** {len(date_columns)} adet")
+
+# String tarihleri datetime nesnesine çevir
+parsed_dates = []
+for date_str in date_columns:
+    try:
+        parsed_date = datetime.datetime.strptime(date_str, "%Y/%m")
+        parsed_dates.append(parsed_date)
+    except:
+        continue
+
+# Tarih aralığını güvenli şekilde göster
+if parsed_dates:
+    min_date = min(parsed_dates).strftime("%Y/%m")
+    max_date = max(parsed_dates).strftime("%Y/%m")
+    st.write(f"Tarih aralığı: {min_date} - {max_date}")
+else:
+    st.warning("Tarih sütunları uygun formatta değil veya boş.")
+
         
         # Analiz butonu
         if st.button("🔍 Anomali Analizini Başlat", type="primary"):
