@@ -659,4 +659,268 @@ if uploaded_file is not None:
             display_df = suspicious_df[['tesisat_no', 'baglanti_nesnesi', 'risk_skoru', 
                                       'yuksek_risk_anomali', 'orta_risk_anomali', 
                                       'dusuk_risk_anomali', 'anomali_tipleri', 
-                                      'kis_ortalama', '
+                                      'kis_ortalama', 'yaz_ortalama', 'son_tuketim']].copy()
+            
+            display_df = display_df.sort_values('risk_skoru', ascending=False)
+            display_df['risk_skoru'] = display_df['risk_skoru'].round(2)
+            display_df['kis_ortalama'] = display_df['kis_ortalama'].round(2)
+            display_df['yaz_ortalama'] = display_df['yaz_ortalama'].round(2)
+            
+            # Sütun başlıklarını Türkçeleştir
+            display_df.columns = ['Tesisat No', 'Bağlantı Nesnesi', 'Risk Skoru', 
+                                'Yüksek Risk', 'Orta Risk', 'Düşük Risk', 'Anomali Tipleri',
+                                'Kış Ort.', 'Yaz Ort.', 'Son Tüketim']
+            
+            st.dataframe(
+                display_df.style.apply(lambda x: [risk_color(val) if col == 'Risk Skoru' else '' 
+                                                for col, val in x.items()], axis=1),
+                use_container_width=True
+            )
+            
+            # Görselleştirmeler
+            st.subheader("📊 Gelişmiş Analiz Grafikleri")
+            
+            fig1, fig2, fig3, fig4 = create_advanced_visualizations(df, suspicious_df, seasonal_pattern, building_stats)
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                st.plotly_chart(fig1, use_container_width=True)
+            with col2:
+                st.plotly_chart(fig2, use_container_width=True)
+            
+            col3, col4 = st.columns(2)
+            with col3:
+                st.plotly_chart(fig3, use_container_width=True)
+            with col4:
+                st.plotly_chart(fig4, use_container_width=True)
+            
+            # Detaylı tesisat analizi
+            st.subheader("🔍 Detaylı Tesisat Analizi")
+            
+            # Risk skoruna göre sıralı liste
+            sorted_facilities = suspicious_df.sort_values('risk_skoru', ascending=False)['tesisat_no'].tolist()
+            
+            selected_facility = st.selectbox(
+                "Detay analiz için tesisat seçin (Risk skoruna göre sıralı):",
+                sorted_facilities,
+                format_func=lambda x: f"Tesisat {x} (Risk: {suspicious_df[suspicious_df['tesisat_no']==x]['risk_skoru'].iloc[0]:.2f})"
+            )
+            
+            if selected_facility:
+                facility_data = df[df['tesisat_no'] == selected_facility].copy()
+                facility_data = facility_data.sort_values('tarih')
+                
+                facility_info = suspicious_df[suspicious_df['tesisat_no'] == selected_facility].iloc[0]
+                
+                # Tesisat bilgileri
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    st.metric("Risk Skoru", f"{facility_info['risk_skoru']:.2f}")
+                with col2:
+                    st.metric("Bağlantı Nesnesi", facility_info['baglanti_nesnesi'])
+                with col3:
+                    st.metric("Toplam Anomali", facility_info['toplam_anomali'])
+                with col4:
+                    st.metric("Kış/Yaz Oranı", f"{facility_info['kis_ortalama']/facility_info['yaz_ortalama']:.2f}" if facility_info['yaz_ortalama'] > 0 else "∞")
+                
+                # Tesisat grafiği
+                fig_facility = px.line(
+                    facility_data,
+                    x='tarih',
+                    y='sm3',
+                    title=f'Tesisat {selected_facility} - Tüketim Trendi',
+                    labels={'sm3': 'Tüketim (sm³)', 'tarih': 'Tarih'}
+                )
+                
+                # Kış aylarını vurgula
+                winter_data = facility_data[facility_data['is_winter']]
+                if not winter_data.empty:
+                    fig_facility.add_trace(
+                        go.Scatter(
+                            x=winter_data['tarih'],
+                            y=winter_data['sm3'],
+                            mode='markers',
+                            name='Kış Ayları',
+                            marker=dict(color='red', size=8)
+                        )
+                    )
+                
+                # Bina ortalaması çizgisi
+                building_id = facility_data['baglanti_nesnesi'].iloc[0]
+                building_avg_data = building_stats[building_stats['baglanti_nesnesi'] == building_id]
+                
+                if not building_avg_data.empty:
+                    building_monthly_avg = building_avg_data.groupby('ay')['bina_ortalama'].mean().mean()
+                    fig_facility.add_hline(
+                        y=building_monthly_avg,
+                        line_dash="dash",
+                        line_color="orange",
+                        annotation_text=f"Bina Ortalaması: {building_monthly_avg:.2f}",
+                        annotation_position="top right"
+                    )
+                
+                st.plotly_chart(fig_facility, use_container_width=True)
+                
+                # Anomali detayları
+                st.subheader("⚠️ Tespit Edilen Anomaliler")
+                
+                anomalies = facility_info['anomali_detaylari']
+                
+                for i, anomaly in enumerate(anomalies):
+                    severity_color = {
+                        'Yüksek': '🔴',
+                        'Orta': '🟡', 
+                        'Düşük': '🟢'
+                    }
+                    
+                    with st.expander(f"{severity_color.get(anomaly['severity'], '⚪')} {anomaly['type']} ({anomaly['severity']} Risk)"):
+                        st.write(f"**Açıklama:** {anomaly['details']}")
+                        st.write(f"**Değer:** {anomaly.get('value', 'N/A')}")
+                        
+                        if anomaly.get('date'):
+                            st.write(f"**Tarih:** {anomaly['date'].strftime('%Y-%m-%d')}")
+                        
+                        # Ek detaylar
+                        if anomaly['type'] == 'Bina Ortalaması Altında Tüketim' and anomaly.get('monthly_details'):
+                            st.write("**Aylık Detaylar:**")
+                            for detail in anomaly['monthly_details'][:5]:  # İlk 5 ay
+                                st.write(f"- {detail['month']}. Ay: {detail['facility_consumption']:.2f} sm³ (Bina ort: {detail['building_avg']:.2f} sm³, Sapma: %{detail['deviation_pct']:.1f})")
+                
+                # Karşılaştırma tablosu
+                st.subheader("📊 Karşılaştırma Tablosu")
+                
+                comparison_data = {
+                    'Metrik': [
+                        'Ortalama Tüketim',
+                        'Kış Ortalaması',
+                        'Yaz Ortalaması', 
+                        'Mevsimsel Fark',
+                        'Standart Sapma',
+                        'Maksimum Tüketim',
+                        'Minimum Tüketim'
+                    ],
+                    'Tesisat Değeri': [
+                        f"{facility_data['sm3'].mean():.2f} sm³",
+                        f"{facility_data[facility_data['is_winter']]['sm3'].mean():.2f} sm³",
+                        f"{facility_data[facility_data['ay'].isin([6,7,8])]['sm3'].mean():.2f} sm³",
+                        f"{facility_data[facility_data['is_winter']]['sm3'].mean() - facility_data[facility_data['ay'].isin([6,7,8])]['sm3'].mean():.2f} sm³",
+                        f"{facility_data['sm3'].std():.2f} sm³",
+                        f"{facility_data['sm3'].max():.2f} sm³",
+                        f"{facility_data['sm3'].min():.2f} sm³"
+                    ],
+                    'Genel Ortalama': [
+                        f"{df['sm3'].mean():.2f} sm³",
+                        f"{df[df['is_winter']]['sm3'].mean():.2f} sm³",
+                        f"{df[df['ay'].isin([6,7,8])]['sm3'].mean():.2f} sm³",
+                        f"{df[df['is_winter']]['sm3'].mean() - df[df['ay'].isin([6,7,8])]['sm3'].mean():.2f} sm³",
+                        f"{df['sm3'].std():.2f} sm³",
+                        f"{df['sm3'].max():.2f} sm³",
+                        f"{df['sm3'].min():.2f} sm³"
+                    ]
+                }
+                
+                comparison_df = pd.DataFrame(comparison_data)
+                st.dataframe(comparison_df, use_container_width=True)
+            
+            # Excel export
+            st.subheader("📥 Gelişmiş Analiz Raporu")
+            
+            excel_file = export_advanced_results(suspicious_df, df, seasonal_pattern, building_stats)
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.download_button(
+                    label="📊 Detaylı Excel Raporu İndir",
+                    data=excel_file,
+                    file_name=f"gelismis_kacak_kullanim_raporu_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
+            
+            with col2:
+                # Özet rapor
+                st.write("**Rapor İçeriği:**")
+                st.write("- Şüpheli tesisatlar listesi")
+                st.write("- Detaylı anomali açıklamaları")
+                st.write("- Bina bazında analiz")
+                st.write("- Mevsimsel örüntü analizi")
+                st.write("- Genel istatistikler")
+        
+        else:
+            st.info("✅ Mevcut parametrelerle şüpheli tesisat tespit edilmedi.")
+            st.write("**Öneriler:**")
+            st.write("- Kış ayı düşüş eşiğini düşürün")
+            st.write("- Bina ortalaması sapma eşiğini düşürün")
+            st.write("- Genel örüntü sapma eşiğini düşürün")
+            st.write("- Minimum veri süresini azaltın")
+            
+            # Genel istatistikler yine göster
+            st.subheader("📊 Genel Veri İstatistikleri")
+            
+            monthly_stats = df.groupby(['yil', 'ay']).agg({
+                'sm3': ['mean', 'std', 'count']
+            }).reset_index()
+            
+            monthly_stats.columns = ['Yil', 'Ay', 'Ortalama', 'Standart_Sapma', 'Tesisat_Sayisi']
+            monthly_stats['Tarih'] = pd.to_datetime(monthly_stats[['Yil', 'Ay']].assign(day=1))
+            
+            fig_general = px.line(monthly_stats, x='Tarih', y='Ortalama',
+                                title='Aylık Ortalama Tüketim Trendi',
+                                labels={'Ortalama': 'Ortalama Tüketim (sm³)'})
+            
+            st.plotly_chart(fig_general, use_container_width=True)
+    
+else:
+    st.info("📁 Lütfen analiz edilecek Excel dosyasını yükleyin.")
+    
+    # Gelişmiş örnek veri formatı
+    st.subheader("📋 Beklenen Veri Formatı")
+    
+    sample_data = pd.DataFrame({
+        'tesisat_no': [1001, 1001, 1001, 1002, 1002, 1002],
+        'tarih': ['2023-01-01', '2023-02-01', '2023-07-01', '2023-01-01', '2023-02-01', '2023-07-01'],
+        'baglanti_nesnesi': [100003156, 100003156, 100003156, 100003156, 100003156, 100003156],
+        'sm3': [500.13, 450.25, 180.30, 480.75, 420.50, 170.25]
+    })
+    
+    st.dataframe(sample_data, use_container_width=True)
+    
+    st.markdown("""
+    ## 🔍 **Gelişmiş Anomali Tespit Yöntemleri:**
+    
+    ### 1. **Kış Ayı Ani Düşüş Analizi**
+    - Önceki kış aylarının ortalamasıyla karşılaştırma
+    - Yıllar arası kış tüketim eğilimi analizi
+    - Ani düşüş tarihlerinin tespiti
+    
+    ### 2. **Bina Ortalaması Sapma Analizi**
+    - Aynı binadaki diğer tesisatlarla karşılaştırma
+    - Aylık bazda bina ortalaması hesaplama
+    - Sürekli düşük tüketim tespiti
+    
+    ### 3. **Genel Tüketim Örüntüsü Analizi**
+    - Tüm veriden çıkarılan mevsimsel örüntü
+    - Tesisatın örüntüye uyum seviyesi
+    - Normalize edilmiş sapma hesaplama
+    
+    ### 4. **İstatistiksel Anomali Tespiti**
+    - Isolation Forest algoritması
+    - Çok boyutlu anomali tespit
+    - Otomatik eşik belirleme
+    
+    ### 5. **Risk Skorlama Sistemi**
+    - Anomali tipine göre ağırlıklandırma
+    - Çoklu faktör bazlı puanlama
+    - Öncelik sıralaması
+    
+    **Sütun Açıklamaları:**
+    - **tesisat_no**: Tesisat numarası
+    - **tarih**: Ölçüm tarihi (YYYY-MM-DD formatında)
+    - **baglanti_nesnesi**: Tesisatın bağlı olduğu bina numarası
+    - **sm3**: Aylık doğalgaz tüketimi (standart metreküp)
+    """)
+
+# Footer
+st.markdown("---")
+st.markdown("🔍 **Gelişmiş Doğalgaz Kaçak Kullanım Tespit Sistemi** - Makine öğrenmesi destekli anomali tespit")
+st.markdown("*Kış ayı düşüş analizi, bina ortalaması karşılaştırması ve genel örüntü sapma analizi ile güçlendirilmiş*")
